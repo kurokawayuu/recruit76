@@ -2777,3 +2777,355 @@ function prevent_confirmation_email($email_args) {
     return $email_args;
 }
 add_filter('wpmem_email_filter', 'prevent_confirmation_email', 999);
+
+
+
+
+/**
+ * 検索ワード対応パンくずリスト
+ */
+function improved_breadcrumb() {
+    // 現在のURLを取得
+    $current_url = isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : '';
+    $parsed_url = parse_url($current_url);
+    $path = isset($parsed_url['path']) ? $parsed_url['path'] : '';
+    $query = isset($parsed_url['query']) ? $parsed_url['query'] : '';
+    
+    // クエリパラメータを解析
+    $query_params = array();
+    if (!empty($query)) {
+        parse_str($query, $query_params);
+    }
+    
+    // 検索キーワードを取得（sパラメータ）
+    $search_query = get_search_query();
+    if (empty($search_query) && isset($query_params['s'])) {
+        $search_query = $query_params['s'];
+    }
+    
+    // パス部分を解析
+    $path_parts = explode('/', trim($path, '/'));
+    
+    // URLパスにjobsを含むか確認
+    $is_jobs_path = in_array('jobs', $path_parts);
+    $jobs_index = array_search('jobs', $path_parts);
+    
+    // 検索条件を保存する配列
+    $conditions = array();
+    
+    // パンくずHTMLを構築
+    $breadcrumb = '<div class="breadcrumb">';
+    $breadcrumb .= '<a href="' . home_url() . '">ホーム</a>';
+    $breadcrumb .= ' &gt; <a href="' . home_url('/jobs/') . '">求人情報</a>';
+    
+    // 求人一覧リンク
+    $breadcrumb .= ' &gt; <a href="' . home_url('/jobs/') . '">求人一覧</a>';
+    
+    // URLパスの解析（例: jobs/location/tokyo/position/nurse）
+    if ($is_jobs_path && $jobs_index !== false) {
+        $taxonomy_map = array(
+            'location' => 'job_location',
+            'position' => 'job_position',
+            'type' => 'job_type',
+            'facility' => 'facility_type',
+            'feature' => 'job_feature'
+        );
+        
+        $segments = array();
+        
+        // URLパスを解析して、タクソノミーとスラッグのペアを抽出
+        for ($i = $jobs_index + 1; $i < count($path_parts) - 1; $i += 2) {
+            if (isset($path_parts[$i]) && isset($path_parts[$i+1])) {
+                $tax_segment = $path_parts[$i];
+                $term_slug = $path_parts[$i+1];
+                
+                if (isset($taxonomy_map[$tax_segment])) {
+                    $taxonomy = $taxonomy_map[$tax_segment];
+                    $segments[] = array(
+                        'segment' => $tax_segment,
+                        'slug' => $term_slug,
+                        'taxonomy' => $taxonomy
+                    );
+                }
+            }
+        }
+        
+        // パス内の条件でパンくずを構築
+        foreach ($segments as $segment) {
+            $term = get_term_by('slug', $segment['slug'], $segment['taxonomy']);
+            
+            if ($term) {
+                // 階層を持つタクソノミーで親がある場合（主にlocation）
+                if ($segment['segment'] == 'location' && $term->parent != 0) {
+                    $parent_terms = array();
+                    $parent_id = $term->parent;
+                    
+                    // 親ターム階層を取得
+                    while ($parent_id) {
+                        $parent = get_term($parent_id, $segment['taxonomy']);
+                        if (is_wp_error($parent)) {
+                            break;
+                        }
+                        $parent_terms[] = array(
+                            'term' => $parent,
+                            'url' => home_url('/jobs/location/' . $parent->slug . '/')
+                        );
+                        $parent_id = $parent->parent;
+                    }
+                    
+                    // 親から順に表示
+                    foreach (array_reverse($parent_terms) as $parent_data) {
+                        $parent = $parent_data['term'];
+                        $parent_url = $parent_data['url'];
+                        
+                        $breadcrumb .= ' &gt; <a href="' . esc_url($parent_url) . '">' . esc_html($parent->name) . '</a>';
+                        
+                        // 条件にも追加
+                        $conditions[] = $parent->name;
+                    }
+                }
+                
+                // 現在の条件を追加
+                $term_url = home_url('/jobs/' . $segment['segment'] . '/' . $term->slug . '/');
+                
+                // すべての条件をリンクにする
+                $breadcrumb .= ' &gt; <a href="' . esc_url($term_url) . '">' . esc_html($term->name) . '</a>';
+                
+                // 条件に追加
+                $conditions[] = $term->name;
+            }
+        }
+        
+        // クエリパラメータの解析（例: ?features[]=mikeiken&features[]=shouyo）
+        if (isset($query_params['features']) && is_array($query_params['features'])) {
+            // features[]パラメータを解析
+            $feature_slugs = $query_params['features'];
+            
+            foreach ($feature_slugs as $index => $slug) {
+                $term = get_term_by('slug', $slug, 'job_feature');
+                if ($term && !is_wp_error($term)) {
+                    // 特徴用のURLを生成
+                    $feature_url = home_url('/jobs/feature/' . $term->slug . '/');
+                    
+                    // 個別の特徴リンクを追加
+                    $breadcrumb .= ' &gt; <a href="' . esc_url($feature_url) . '">' . esc_html($term->name) . '</a>';
+                    
+                    // 条件に追加
+                    $conditions[] = $term->name;
+                }
+            }
+        }
+    } 
+    // タクソノミーアーカイブページの場合
+    elseif (is_tax()) {
+        $term = get_queried_object();
+        $taxonomy = $term->taxonomy;
+        
+        // タクソノミー名からURLのセグメント部分を決定
+        $tax_segment = '';
+        switch ($taxonomy) {
+            case 'job_location':
+                $tax_segment = 'location';
+                break;
+            case 'job_position':
+                $tax_segment = 'position';
+                break;
+            case 'job_type':
+                $tax_segment = 'type';
+                break;
+            case 'facility_type':
+                $tax_segment = 'facility';
+                break;
+            case 'job_feature':
+                $tax_segment = 'feature';
+                break;
+        }
+        
+        // 階層を持つタクソノミーの場合は親も表示
+        if ($term->parent != 0) {
+            $parents = array();
+            $parent_id = $term->parent;
+            
+            // 親タームを遡って配列に追加
+            while ($parent_id) {
+                $parent = get_term($parent_id, $taxonomy);
+                if (is_wp_error($parent)) {
+                    break;
+                }
+                $parents[] = $parent;
+                $parent_id = $parent->parent;
+            }
+            
+            // 親タームを逆順で表示（祖先→子の順）
+            foreach (array_reverse($parents) as $parent) {
+                // カスタム形式のURLを生成
+                $parent_url = home_url('/jobs/' . $tax_segment . '/' . $parent->slug . '/');
+                $breadcrumb .= ' &gt; <a href="' . esc_url($parent_url) . '">' . esc_html($parent->name) . '</a>';
+                
+                // 条件にも追加
+                $conditions[] = $parent->name;
+            }
+        }
+        
+        // 現在のタームを追加
+        $term_url = home_url('/jobs/' . $tax_segment . '/' . $term->slug . '/');
+        $breadcrumb .= ' &gt; <a href="' . esc_url($term_url) . '">' . esc_html($term->name) . '</a>';
+        
+        // 条件にも追加
+        $conditions[] = $term->name;
+    }
+    // 求人アーカイブページの場合
+    elseif (is_post_type_archive('job') && empty($search_query)) {
+        // 検索キーワードがない場合は単に「求人一覧」を現在地として表示
+        // すでに「求人一覧」リンクは追加済み
+    }
+    // 求人詳細ページの場合
+    elseif (is_singular('job')) {
+        // エリア情報を階層的に表示
+        $job_locations = get_the_terms(get_the_ID(), 'job_location');
+        if ($job_locations && !is_wp_error($job_locations)) {
+            $location = $job_locations[0];
+            
+            // 親タームがある場合は階層を表示
+            if ($location->parent != 0) {
+                $parents = array();
+                $parent_id = $location->parent;
+                
+                while ($parent_id) {
+                    $parent = get_term($parent_id, 'job_location');
+                    if (is_wp_error($parent)) {
+                        break;
+                    }
+                    $parents[] = $parent;
+                    $parent_id = $parent->parent;
+                }
+                
+                foreach (array_reverse($parents) as $parent) {
+                    // カスタム形式のURLを生成
+                    $parent_url = home_url('/jobs/location/' . $parent->slug . '/');
+                    $breadcrumb .= ' &gt; <a href="' . esc_url($parent_url) . '">' . esc_html($parent->name) . '</a>';
+                }
+            }
+            
+            // カスタム形式のURLを生成
+            $location_url = home_url('/jobs/location/' . $location->slug . '/');
+            $breadcrumb .= ' &gt; <a href="' . esc_url($location_url) . '">' . esc_html($location->name) . '</a>';
+        }
+        
+        // 職種情報
+        $job_positions = get_the_terms(get_the_ID(), 'job_position');
+        if ($job_positions && !is_wp_error($job_positions)) {
+            $position = $job_positions[0];
+            // カスタム形式のURLを生成
+            $position_url = home_url('/jobs/position/' . $position->slug . '/');
+            $breadcrumb .= ' &gt; <a href="' . esc_url($position_url) . '">' . esc_html($position->name) . '</a>';
+        }
+        
+        // 求人タイトル
+        $facility_name = get_post_meta(get_the_ID(), 'facility_name', true);
+        if (!empty($facility_name)) {
+            $breadcrumb .= ' &gt; ' . esc_html($facility_name);
+        } else {
+            $breadcrumb .= ' &gt; ' . get_the_title();
+        }
+    }
+    
+    // 検索キーワードがある場合は追加（どのページタイプでも）
+    if (!empty($search_query)) {
+        $breadcrumb .= ' &gt; <span>' . esc_html($search_query) . '</span><span style="font-size:0.8em;">(検索したワード)</span>';
+    }
+    
+    // パンくずリストを閉じる
+    $breadcrumb .= '</div>';
+    
+    return $breadcrumb;
+}
+
+/**
+ * パンくずリストを表示する関数
+ */
+function display_breadcrumb() {
+    echo improved_breadcrumb();
+}
+
+/**
+ * ページタイトルを生成する関数
+ */
+function get_search_title() {
+    // 検索キーワードを取得
+    $search_query = get_search_query();
+    if (!empty($search_query)) {
+        return '「' . esc_html($search_query) . '」の検索結果';
+    }
+    
+    // 条件を収集
+    $conditions = array();
+    
+    // URLからパスパラメータを取得
+    $current_url = isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : '';
+    $parsed_url = parse_url($current_url);
+    $path = isset($parsed_url['path']) ? $parsed_url['path'] : '';
+    $query = isset($parsed_url['query']) ? $parsed_url['query'] : '';
+    
+    // クエリパラメータを解析
+    $query_params = array();
+    if (!empty($query)) {
+        parse_str($query, $query_params);
+    }
+    
+    // パスからtaxonomyパラメータを取得
+    $path_parts = explode('/', trim($path, '/'));
+    $jobs_index = array_search('jobs', $path_parts);
+    
+    if ($jobs_index !== false) {
+        $taxonomy_map = array(
+            'location' => 'job_location',
+            'position' => 'job_position',
+            'type' => 'job_type',
+            'facility' => 'facility_type',
+            'feature' => 'job_feature'
+        );
+        
+        for ($i = $jobs_index + 1; $i < count($path_parts) - 1; $i += 2) {
+            if (isset($path_parts[$i]) && isset($path_parts[$i+1])) {
+                $tax_segment = $path_parts[$i];
+                $term_slug = $path_parts[$i+1];
+                
+                if (isset($taxonomy_map[$tax_segment])) {
+                    $taxonomy = $taxonomy_map[$tax_segment];
+                    $term = get_term_by('slug', $term_slug, $taxonomy);
+                    
+                    if ($term) {
+                        $conditions[] = $term->name;
+                    }
+                }
+            }
+        }
+    }
+    
+    // クエリパラメータからfeature条件を取得
+    if (isset($query_params['features']) && is_array($query_params['features'])) {
+        foreach ($query_params['features'] as $slug) {
+            $term = get_term_by('slug', $slug, 'job_feature');
+            if ($term) {
+                $conditions[] = $term->name;
+            }
+        }
+    }
+    
+    // タクソノミーページの場合
+    if (is_tax()) {
+        $term = get_queried_object();
+        if (!in_array($term->name, $conditions)) {
+            $conditions[] = $term->name;
+        }
+    }
+    
+    // 条件がある場合は条件タイトルを返す
+    if (!empty($conditions)) {
+        return implode(' × ', $conditions) . 'の求人情報';
+    }
+    
+    // デフォルト
+    return '求人情報一覧';
+}
